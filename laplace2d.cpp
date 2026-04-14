@@ -42,7 +42,7 @@ int main(int argc, const char** argv)
 
   printf("Jacobi relaxation Calculation: %d x %d mesh\n", imax+2, jmax+2);
 
-  int iter = 0;
+  int iter = 1000;
 
   for (int i = 1; i < imax+2; i++)
     Anew[(0)*(imax+2)+i]   = 0.0;
@@ -59,7 +59,7 @@ int main(int argc, const char** argv)
   while ( error > tol && iter < iter_max )
   {
     error = 0.0;
-#pragma omp parallel for reduction(max:error)
+#pragma omp parallel for reduction(max:error) collapse(2)
     for( int j = 1; j < jmax+1; j++ )
     {
       for( int i = 1; i < imax+1; i++)
@@ -69,7 +69,7 @@ int main(int argc, const char** argv)
         error = fmax( error, fabs(Anew[(j)*(imax+2)+i]-A[(j)*(imax+2)+i]));
       }
     }
-#pragma omp parallel for
+#pragma omp parallel for collapse(2)
     for( int j = 1; j < jmax+1; j++ )
     {
       for( int i = 1; i < imax+1; i++)

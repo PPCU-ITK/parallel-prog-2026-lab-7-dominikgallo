@@ -2,11 +2,13 @@
 #include <iostream>
 #include <vector>
 #include <chrono>
+#include <omp.h> // OpenMP header hozzáadása
 
 // Function prototypes
 void matrix_vector_multiply_csr(const double* values, const int* col_indices, const int* row_start, const double* x, double* result, int n);
 
 void conjugate_gradient_csr(const double* values, const int* col_indices, const int* row_start, const double* b, double* x, int n, int max_iterations, double tolerance) {
+    // A -gpu=managed miatt ezek a new hívások automatikusan Unified Memory-ba (menedzselt memóriába) kerülnek!
     double* r = new double[n];
     double* p = new double[n];
     double* Ap = new double[n];
@@ -14,41 +16,55 @@ void conjugate_gradient_csr(const double* values, const int* col_indices, const 
 
     // Initial step: compute r = b - A*x
     matrix_vector_multiply_csr(values, col_indices, row_start, x, Ax, n);
+    
+    #pragma omp target teams distribute parallel for
     for (int i = 0; i < n; ++i) {
         r[i] = b[i] - Ax[i];
         p[i] = r[i];
     }
 
     double rsold = 0.0;
+    // REDUKCIÓ 1: rsold kiszámítása
+    #pragma omp target teams distribute parallel for reduction(+:rsold)
     for (int i = 0; i < n; ++i) {
         rsold += r[i] * r[i];
     }
 
     for (int i = 0; i < max_iterations; ++i) {
         matrix_vector_multiply_csr(values, col_indices, row_start, p, Ap, n);
+        
         double pAp = 0.0;
+        // REDUKCIÓ 2: pAp kiszámítása
+        #pragma omp target teams distribute parallel for reduction(+:pAp)
         for (int j = 0; j < n; ++j) {
             pAp += p[j] * Ap[j];
         }
+        
         double alpha = rsold / pAp;
 
+        // Vektorok frissítése
+        #pragma omp target teams distribute parallel for
         for (int j = 0; j < n; ++j) {
             x[j] += alpha * p[j];
             r[j] -= alpha * Ap[j];
         }
 
         double rsnew = 0.0;
+        // REDUKCIÓ 3: rsnew kiszámítása
+        #pragma omp target teams distribute parallel for reduction(+:rsnew)
         for (int j = 0; j < n; ++j) {
             rsnew += r[j] * r[j];
         }
 
         if (sqrt(rsnew) < tolerance) {
-	    std::cout << "Final residual " << sqrt(rsnew) << std::endl;
+            std::cout << "Final residual " << sqrt(rsnew) << std::endl;
             break;
-        } else if (i%100 == 0) {
-	    std::cout << i << " residual " << sqrt(rsnew) << std::endl;
-	}
+        } else if (i % 100 == 0) {
+            std::cout << i << " residual " << sqrt(rsnew) << std::endl;
+        }
 
+        // p vektor frissítése
+        #pragma omp target teams distribute parallel for
         for (int j = 0; j < n; ++j) {
             p[j] = r[j] + (rsnew / rsold) * p[j];
         }
@@ -63,11 +79,15 @@ void conjugate_gradient_csr(const double* values, const int* col_indices, const 
 }
 
 void matrix_vector_multiply_csr(const double* values, const int* col_indices, const int* row_start, const double* x, double* result, int n) {
+    // Itt "okosan" használjuk a collapse-ot, azaz SEHOGY! 
+    // Mivel a belső ciklus határa 'i'-től függ, nem lehet összevonni a kettőt.
+    #pragma omp target teams distribute parallel for
     for (int i = 0; i < n; ++i) {
-        result[i] = 0.0;
+        double temp = 0.0; // Lokális változóba gyűjtünk, hogy elkerüljük a memória írási ütközéseket a GPU-n!
         for (int j = row_start[i]; j < row_start[i + 1]; ++j) {
-            result[i] += values[j] * x[col_indices[j]];
+            temp += values[j] * x[col_indices[j]];
         }
+        result[i] = temp;
     }
 }
 
@@ -124,11 +144,17 @@ int main() {
     // Solve the system using a CSR-based Conjugate Gradient method
     int max_iterations = 1000;
     double tolerance = 1e-8;
+    
+    std::cout << "Starting CG solver..." << std::endl;
     auto t1 = std::chrono::high_resolution_clock::now();
+    
     conjugate_gradient_csr(val_array, col_array, row_start_array, b_array, x_array, n, max_iterations, tolerance);
+    
     auto t2 = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> ms_double = t2 - t1;
-    std::cout << ms_double.count() << "ms\n";
+    
+    std::cout << "Solver finished in: " << ms_double.count() << " ms\n";
+    
     // Output the solution
     std::cout << "Temperature distribution:" << std::endl;
     for (int i = n/2; i < n/2+1; ++i) {
